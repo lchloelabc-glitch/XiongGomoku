@@ -1,0 +1,20 @@
+{
+  "name": "xiong-gomoku-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "熊浩的五子棋公网 WebSocket 服务器",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test",
+    "test:integration": "node --test test/integration.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

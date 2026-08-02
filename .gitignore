@@ -1,0 +1,7 @@
+.gradle/
+.idea/
+*.iml
+local.properties
+build/
+app/build/
+server/node_modules/
