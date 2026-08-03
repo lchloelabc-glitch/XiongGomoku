@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 当前公网服务使用 ws://。更换为 wss:// 域名后应改回禁止明文流量。 -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

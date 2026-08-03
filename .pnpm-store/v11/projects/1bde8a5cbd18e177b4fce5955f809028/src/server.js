@@ -14,7 +14,6 @@ import { RoomError, RoomManager } from "./room-manager.js";
 const NOT_IMPLEMENTED_TYPES = new Set([
   MessageType.PLAYER_READY,
   MessageType.ROCK_PAPER_SCISSORS,
-  MessageType.MOVE,
   MessageType.REMATCH_REQUEST
 ]);
 
@@ -80,6 +79,21 @@ export function createGameServer({
     );
   }
 
+  function broadcastGameStart(room) {
+    broadcastRoom(room, createMessage(MessageType.GAME_START, {
+      blackPlayer: room.blackPlayer,
+      whitePlayer: room.whitePlayer,
+      currentPlayer: room.currentPlayer
+    }));
+  }
+
+  function broadcastGameState(room) {
+    broadcastRoom(
+      room,
+      createMessage(MessageType.GAME_STATE, roomManager.getGameSnapshot(room))
+    );
+  }
+
   function notifyPlayerLeft(result, reason) {
     if (!result?.room) return;
     broadcastRoom(
@@ -120,6 +134,23 @@ export function createGameServer({
             room: roomManager.getSnapshot(room)
           }, requestId));
           broadcastRoomState(room);
+          broadcastGameStart(room);
+          broadcastGameState(room);
+          break;
+        }
+        case MessageType.MOVE: {
+          const result = roomManager.makeMove(
+            socket,
+            message.payload.row,
+            message.payload.col
+          );
+          broadcastGameState(result.room);
+          if (result.result) {
+            broadcastRoom(result.room, createMessage(MessageType.GAME_OVER, {
+              winner: result.room.winner,
+              reason: result.result
+            }));
+          }
           break;
         }
         case MessageType.PLAYER_LEAVE: {

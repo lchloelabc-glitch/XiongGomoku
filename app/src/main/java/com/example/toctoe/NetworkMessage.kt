@@ -1,87 +1,191 @@
 package com.example.toctoe
 
-import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
-const val PROTOCOL_VERSION = 1
+const val PROTOCOL_VERSION = 2
 
-sealed interface NetworkMessage {
-    data class Join(val roomCode: String) : NetworkMessage
-    data class JoinOk(val player: Player = Player.O) : NetworkMessage
-    data class JoinError(val message: String) : NetworkMessage
-    data class Move(val index: Int, val player: Player) : NetworkMessage
-    data class State(val gameState: GameState) : NetworkMessage
-    data object ResetRequest : NetworkMessage
-    data class Reset(val gameState: GameState) : NetworkMessage
-    data class Leave(val message: String = "对方已退出房间") : NetworkMessage
-    data class Error(val message: String) : NetworkMessage
+object ServerConfig {
+    const val WEB_SOCKET_URL = "ws://118.31.168.127:8080/ws"
+}
+
+data class RoomPlayer(val playerId: String, val seat: Int)
+
+data class RoomSnapshot(
+    val roomCode: String,
+    val status: String,
+    val playerCount: Int,
+    val maxPlayers: Int,
+    val players: List<RoomPlayer>
+)
+
+sealed interface ServerMessage {
+    data class Connected(val message: String) : ServerMessage
+    data class RoomCreated(
+        val roomCode: String,
+        val playerId: String,
+        val seat: Int,
+        val room: RoomSnapshot
+    ) : ServerMessage
+
+    data class RoomJoined(
+        val roomCode: String,
+        val playerId: String,
+        val seat: Int,
+        val room: RoomSnapshot
+    ) : ServerMessage
+
+    data class RoomState(val room: RoomSnapshot) : ServerMessage
+    data class GameStart(
+        val blackPlayerId: String,
+        val whitePlayerId: String,
+        val currentPlayer: Stone
+    ) : ServerMessage
+
+    data class GameStateUpdate(val state: GomokuGameState) : ServerMessage
+    data class GameOver(val winnerId: String?, val reason: String) : ServerMessage
+    data class RoomExpired(val roomCode: String, val message: String) : ServerMessage
+    data class PlayerLeave(
+        val playerId: String,
+        val reason: String,
+        val acknowledged: Boolean
+    ) : ServerMessage
+
+    data class Pong(val requestId: String?) : ServerMessage
+    data class Error(val code: String, val message: String) : ServerMessage
+    data class Unknown(val type: String) : ServerMessage
 }
 
 object NetworkMessageCodec {
-    fun encode(message: NetworkMessage): String {
-        val json = JSONObject().put("protocolVersion", PROTOCOL_VERSION)
-        when (message) {
-            is NetworkMessage.Join -> json.put("type", "JOIN").put("roomCode", message.roomCode)
-            is NetworkMessage.JoinOk -> json.put("type", "JOIN_OK").put("player", message.player.name)
-            is NetworkMessage.JoinError -> json.put("type", "JOIN_ERROR").put("message", message.message)
-            is NetworkMessage.Move -> json.put("type", "MOVE")
-                .put("index", message.index).put("player", message.player.name)
-            is NetworkMessage.State -> putState(json.put("type", "STATE"), message.gameState)
-            NetworkMessage.ResetRequest -> json.put("type", "RESET_REQUEST")
-            is NetworkMessage.Reset -> putState(json.put("type", "RESET"), message.gameState)
-            is NetworkMessage.Leave -> json.put("type", "LEAVE").put("message", message.message)
-            is NetworkMessage.Error -> json.put("type", "ERROR").put("message", message.message)
-        }
-        return json.toString()
-    }
+    fun createRoom(): String = clientMessage("CREATE_ROOM", JSONObject())
 
-    fun decode(line: String): NetworkMessage {
-        val json = try {
-            JSONObject(line)
+    fun joinRoom(roomCode: String): String = clientMessage(
+        "JOIN_ROOM",
+        JSONObject().put("roomCode", roomCode)
+    )
+
+    fun move(row: Int, col: Int): String = clientMessage(
+        "MOVE",
+        JSONObject().put("row", row).put("col", col)
+    )
+
+    fun playerLeave(): String = clientMessage("PLAYER_LEAVE", JSONObject())
+    fun ping(): String = clientMessage("PING", JSONObject())
+
+    fun decodeServerMessage(text: String): ServerMessage {
+        val root = try {
+            JSONObject(text)
         } catch (_: Exception) {
-            throw IllegalArgumentException("JSON 消息格式错误")
+            throw IllegalArgumentException("服务器返回了无效 JSON")
         }
-        if (json.optInt("protocolVersion", -1) != PROTOCOL_VERSION) {
-            throw IllegalArgumentException("协议版本不兼容")
+        if (root.optInt("protocolVersion", -1) != PROTOCOL_VERSION) {
+            throw IllegalArgumentException("服务器协议版本不兼容")
         }
-        return when (json.optString("type")) {
-            "JOIN" -> NetworkMessage.Join(json.getString("roomCode"))
-            "JOIN_OK" -> NetworkMessage.JoinOk(player(json.getString("player")))
-            "JOIN_ERROR" -> NetworkMessage.JoinError(json.optString("message", "加入房间失败"))
-            "MOVE" -> NetworkMessage.Move(json.getInt("index"), player(json.getString("player")))
-            "STATE" -> NetworkMessage.State(readState(json))
-            "RESET_REQUEST" -> NetworkMessage.ResetRequest
-            "RESET" -> NetworkMessage.Reset(readState(json))
-            "LEAVE" -> NetworkMessage.Leave(json.optString("message", "对方已退出房间"))
-            "ERROR" -> NetworkMessage.Error(json.optString("message", "发生未知错误"))
-            else -> throw IllegalArgumentException("未知消息类型")
+        val type = root.optString("type")
+        val payload = root.optJSONObject("payload") ?: JSONObject()
+        return when (type) {
+            "CONNECTED" -> ServerMessage.Connected(payload.optString("message", "已连接服务器"))
+            "ROOM_CREATED" -> ServerMessage.RoomCreated(
+                payload.requiredString("roomCode"),
+                payload.requiredString("playerId"),
+                payload.getInt("seat"),
+                readRoom(payload.getJSONObject("room"))
+            )
+            "ROOM_JOINED" -> ServerMessage.RoomJoined(
+                payload.requiredString("roomCode"),
+                payload.requiredString("playerId"),
+                payload.getInt("seat"),
+                readRoom(payload.getJSONObject("room"))
+            )
+            "ROOM_STATE" -> ServerMessage.RoomState(readRoom(payload.getJSONObject("room")))
+            "GAME_START" -> ServerMessage.GameStart(
+                payload.requiredString("blackPlayer"),
+                payload.requiredString("whitePlayer"),
+                payload.requiredStone("currentPlayer")
+            )
+            "GAME_STATE" -> ServerMessage.GameStateUpdate(readGameState(payload))
+            "GAME_OVER" -> ServerMessage.GameOver(
+                payload.optionalString("winner"),
+                payload.requiredString("reason")
+            )
+            "ROOM_EXPIRED" -> ServerMessage.RoomExpired(
+                payload.optString("roomCode"),
+                payload.optString("message", "房间已过期")
+            )
+            "PLAYER_LEAVE" -> ServerMessage.PlayerLeave(
+                payload.optString("playerId"),
+                payload.optString("reason", "玩家已退出房间"),
+                payload.optBoolean("acknowledged", false)
+            )
+            "PONG" -> ServerMessage.Pong(root.optString("requestId").ifEmpty { null })
+            "ERROR" -> ServerMessage.Error(
+                payload.optString("code", "UNKNOWN_ERROR"),
+                payload.optString("message", "服务器返回未知错误")
+            )
+            else -> ServerMessage.Unknown(type)
         }
     }
 
-    private fun player(value: String): Player = try {
-        Player.valueOf(value)
-    } catch (_: Exception) {
-        throw IllegalArgumentException("玩家标识无效")
-    }
-
-    private fun putState(json: JSONObject, state: GameState): JSONObject = json
-        .put("board", JSONArray(state.board))
-        .put("currentTurn", state.currentTurn.name)
-        .put("winner", state.winner)
-        .put("gameOver", state.gameOver)
-        .put("statusMessage", state.statusMessage)
-
-    private fun readState(json: JSONObject): GameState {
-        val array = json.getJSONArray("board")
-        require(array.length() == 9) { "棋盘数据长度错误" }
-        val board = List(9) { index -> array.getString(index) }
-        require(board.all { it == "" || it == "X" || it == "O" }) { "棋盘数据无效" }
-        return GameState(
+    private fun readGameState(json: JSONObject): GomokuGameState {
+        val boardJson = json.getJSONArray("board")
+        if (boardJson.length() != GOMOKU_CELL_COUNT) {
+            throw IllegalArgumentException("服务器棋盘数据长度错误")
+        }
+        val board = List(boardJson.length()) { index ->
+            when (boardJson.getString(index)) {
+                "" -> null
+                "BLACK" -> Stone.BLACK
+                "WHITE" -> Stone.WHITE
+                else -> throw IllegalArgumentException("服务器棋子数据无效")
+            }
+        }
+        val lastMoveJson = json.optJSONObject("lastMove")
+        return GomokuGameState(
             board = board,
-            currentTurn = player(json.getString("currentTurn")),
-            winner = json.optString("winner"),
-            gameOver = json.getBoolean("gameOver"),
-            statusMessage = json.optString("statusMessage")
+            currentPlayer = json.optionalString("currentPlayer")?.toStone(),
+            blackPlayerId = json.requiredString("blackPlayer"),
+            whitePlayerId = json.requiredString("whitePlayer"),
+            winnerId = json.optionalString("winner"),
+            gameOver = json.optBoolean("gameOver", false),
+            lastMove = lastMoveJson?.let { BoardPosition(it.getInt("row"), it.getInt("col")) },
+            moveCount = json.optInt("moveCount", 0)
         )
     }
+
+    private fun clientMessage(type: String, payload: JSONObject): String = JSONObject()
+        .put("type", type)
+        .put("protocolVersion", PROTOCOL_VERSION)
+        .put("requestId", UUID.randomUUID().toString())
+        .put("payload", payload)
+        .toString()
+
+    private fun readRoom(json: JSONObject): RoomSnapshot {
+        val playerArray = json.getJSONArray("players")
+        val players = List(playerArray.length()) { index ->
+            val player = playerArray.getJSONObject(index)
+            RoomPlayer(player.requiredString("playerId"), player.getInt("seat"))
+        }
+        return RoomSnapshot(
+            json.requiredString("roomCode"),
+            json.requiredString("status"),
+            json.getInt("playerCount"),
+            json.getInt("maxPlayers"),
+            players
+        )
+    }
+
+    private fun JSONObject.requiredStone(name: String): Stone = requiredString(name).toStone()
+
+    private fun String.toStone(): Stone = when (this) {
+        "BLACK" -> Stone.BLACK
+        "WHITE" -> Stone.WHITE
+        else -> throw IllegalArgumentException("服务器棋子颜色无效")
+    }
+
+    private fun JSONObject.optionalString(name: String): String? =
+        if (!has(name) || isNull(name)) null else getString(name).takeIf(String::isNotBlank)
+
+    private fun JSONObject.requiredString(name: String): String =
+        getString(name).takeIf(String::isNotBlank)
+            ?: throw IllegalArgumentException("服务器消息缺少 $name")
 }

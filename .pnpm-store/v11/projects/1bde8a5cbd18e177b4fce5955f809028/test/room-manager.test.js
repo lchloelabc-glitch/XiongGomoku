@@ -26,7 +26,7 @@ test("创建六位房间并绑定第一名玩家", () => {
   });
 });
 
-test("第二名玩家加入后房间变为已满", () => {
+test("第二名玩家加入后自动开始五子棋", () => {
   const manager = createManager();
   const host = {};
   const guest = {};
@@ -34,8 +34,41 @@ test("第二名玩家加入后房间变为已满", () => {
   const { room, player } = manager.joinRoom(guest, "583921");
 
   assert.equal(player.seat, 2);
-  assert.equal(room.status, RoomStatus.FULL);
+  assert.equal(room.status, RoomStatus.PLAYING);
   assert.equal(manager.getSnapshot(room).playerCount, 2);
+  assert.equal(room.blackPlayer, "player-1");
+  assert.equal(room.whitePlayer, "player-2");
+  assert.equal(room.currentPlayer, "BLACK");
+  assert.equal(room.board.length, 225);
+});
+
+test("服务器校验回合、空位并判定五连胜利", () => {
+  const manager = createManager();
+  const host = {};
+  const guest = {};
+  const { room } = manager.createRoom(host);
+  manager.joinRoom(guest, "583921");
+
+  assert.throws(
+    () => manager.makeMove(guest, 7, 3),
+    (error) => error instanceof RoomError && error.code === "NOT_YOUR_TURN"
+  );
+
+  for (let col = 3; col <= 6; col += 1) {
+    manager.makeMove(host, 7, col);
+    manager.makeMove(guest, 8, col);
+  }
+
+  assert.throws(
+    () => manager.makeMove(host, 8, 3),
+    (error) => error instanceof RoomError && error.code === "CELL_OCCUPIED"
+  );
+
+  const result = manager.makeMove(host, 7, 7);
+  assert.equal(result.result, "WIN");
+  assert.equal(room.status, RoomStatus.FINISHED);
+  assert.equal(room.winner, "player-1");
+  assert.equal(room.gameOver, true);
 });
 
 test("拒绝第三名玩家加入", () => {

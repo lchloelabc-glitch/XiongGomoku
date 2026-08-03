@@ -1,8 +1,17 @@
 import { randomInt, randomUUID } from "node:crypto";
+import {
+  GameResult,
+  GomokuError,
+  Stone,
+  createEmptyBoard,
+  oppositeStone,
+  placeStone
+} from "./gomokuEngine.js";
 
 export const RoomStatus = Object.freeze({
   WAITING: "WAITING",
-  FULL: "FULL"
+  PLAYING: "PLAYING",
+  FINISHED: "FINISHED"
 });
 
 export class RoomError extends Error {
@@ -48,7 +57,16 @@ export class RoomManager {
       status: RoomStatus.WAITING,
       players: new Map(),
       createdAt: timestamp,
-      lastActivityAt: timestamp
+      lastActivityAt: timestamp,
+      board: createEmptyBoard(),
+      currentPlayer: Stone.BLACK,
+      blackPlayer: null,
+      whitePlayer: null,
+      winner: null,
+      gameOver: false,
+      resultReason: null,
+      lastMove: null,
+      moveCount: 0
     };
     const player = this.#createPlayer(socket, 1, timestamp);
     room.players.set(player.playerId, player);
@@ -76,10 +94,58 @@ export class RoomManager {
     const timestamp = this.now();
     const player = this.#createPlayer(socket, seat, timestamp);
     room.players.set(player.playerId, player);
-    room.status = RoomStatus.FULL;
     room.lastActivityAt = timestamp;
     this.connectionBindings.set(socket, { roomCode, playerId: player.playerId });
+    this.#startGame(room);
     return { room, player };
+  }
+
+  makeMove(socket, row, col) {
+    const binding = this.connectionBindings.get(socket);
+    if (!binding) throw new RoomError("NOT_IN_ROOM", "当前玩家不属于任何房间");
+    const room = this.rooms.get(binding.roomCode);
+    if (!room) throw new RoomError("ROOM_NOT_FOUND", "房间不存在或已过期");
+    if (room.status === RoomStatus.FINISHED || room.gameOver) {
+      throw new RoomError("GAME_ALREADY_OVER", "游戏已经结束");
+    }
+    if (room.status !== RoomStatus.PLAYING || !room.blackPlayer || !room.whitePlayer) {
+      throw new RoomError("GAME_NOT_STARTED", "游戏尚未开始");
+    }
+
+    const expectedPlayerId = room.currentPlayer === Stone.BLACK
+      ? room.blackPlayer
+      : room.whitePlayer;
+    if (binding.playerId !== expectedPlayerId) {
+      throw new RoomError("NOT_YOUR_TURN", "还没有轮到你落子");
+    }
+
+    let moveResult;
+    try {
+      moveResult = placeStone(room.board, row, col, room.currentPlayer);
+    } catch (error) {
+      if (error instanceof GomokuError) throw new RoomError(error.code, error.message);
+      throw error;
+    }
+
+    const stone = room.currentPlayer;
+    room.moveCount += 1;
+    room.lastActivityAt = this.now();
+    room.lastMove = { row, col, stone, playerId: binding.playerId };
+
+    if (moveResult.result === GameResult.WIN) {
+      room.status = RoomStatus.FINISHED;
+      room.gameOver = true;
+      room.winner = binding.playerId;
+      room.resultReason = GameResult.WIN;
+    } else if (moveResult.result === GameResult.DRAW) {
+      room.status = RoomStatus.FINISHED;
+      room.gameOver = true;
+      room.winner = null;
+      room.resultReason = GameResult.DRAW;
+    } else {
+      room.currentPlayer = oppositeStone(stone);
+    }
+    return { room, playerId: binding.playerId, result: moveResult.result };
   }
 
   touchConnection(socket) {
@@ -100,11 +166,11 @@ export class RoomManager {
 
     room.players.delete(binding.playerId);
     room.lastActivityAt = this.now();
-    room.status = RoomStatus.WAITING;
     if (room.players.size === 0) {
       this.rooms.delete(room.roomCode);
       return { room: null, roomCode: room.roomCode, playerId: binding.playerId };
     }
+    this.#resetGame(room);
     return { room, roomCode: room.roomCode, playerId: binding.playerId };
   }
 
@@ -125,8 +191,25 @@ export class RoomManager {
       players: [...room.players.values()]
         .sort((left, right) => left.seat - right.seat)
         .map((player) => ({ playerId: player.playerId, seat: player.seat })),
+      blackPlayer: room.blackPlayer,
+      whitePlayer: room.whitePlayer,
+      winner: room.winner,
       createdAt: new Date(room.createdAt).toISOString(),
       lastActivityAt: new Date(room.lastActivityAt).toISOString()
+    };
+  }
+
+  getGameSnapshot(room) {
+    return {
+      roomCode: room.roomCode,
+      board: [...room.board],
+      currentPlayer: room.currentPlayer,
+      blackPlayer: room.blackPlayer,
+      whitePlayer: room.whitePlayer,
+      winner: room.winner,
+      gameOver: room.gameOver,
+      lastMove: room.lastMove,
+      moveCount: room.moveCount
     };
   }
 
@@ -140,6 +223,34 @@ export class RoomManager {
       expired.push({ roomCode, sockets });
     }
     return expired;
+  }
+
+  #startGame(room) {
+    const players = [...room.players.values()].sort((left, right) => left.seat - right.seat);
+    if (players.length !== 2) return;
+    room.board = createEmptyBoard();
+    room.currentPlayer = Stone.BLACK;
+    room.blackPlayer = players[0].playerId;
+    room.whitePlayer = players[1].playerId;
+    room.winner = null;
+    room.gameOver = false;
+    room.resultReason = null;
+    room.lastMove = null;
+    room.moveCount = 0;
+    room.status = RoomStatus.PLAYING;
+  }
+
+  #resetGame(room) {
+    room.board = createEmptyBoard();
+    room.currentPlayer = Stone.BLACK;
+    room.blackPlayer = null;
+    room.whitePlayer = null;
+    room.winner = null;
+    room.gameOver = false;
+    room.resultReason = null;
+    room.lastMove = null;
+    room.moveCount = 0;
+    room.status = RoomStatus.WAITING;
   }
 
   #createPlayer(socket, seat, timestamp) {

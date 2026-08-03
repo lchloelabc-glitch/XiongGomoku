@@ -99,7 +99,35 @@ test("真实 WebSocket 完成创建、加入、满房、心跳和断线通知", 
   const joined = await guest.inbox.next(MessageType.ROOM_JOINED);
   const hostState = await hostStatePromise;
   assert.equal(joined.payload.room.playerCount, 2);
-  assert.equal(hostState.payload.room.status, "FULL");
+  assert.equal(hostState.payload.room.status, "PLAYING");
+
+  const [hostStart, guestStart] = await Promise.all([
+    host.inbox.next(MessageType.GAME_START),
+    guest.inbox.next(MessageType.GAME_START)
+  ]);
+  assert.equal(hostStart.payload.blackPlayer, created.payload.playerId);
+  assert.equal(guestStart.payload.whitePlayer, joined.payload.playerId);
+  assert.equal(hostStart.payload.currentPlayer, "BLACK");
+  await Promise.all([
+    host.inbox.next(MessageType.GAME_STATE),
+    guest.inbox.next(MessageType.GAME_STATE)
+  ]);
+
+  send(host.socket, MessageType.MOVE, { row: 7, col: 7 });
+  const [hostGameState, guestGameState] = await Promise.all([
+    host.inbox.next(MessageType.GAME_STATE),
+    guest.inbox.next(MessageType.GAME_STATE)
+  ]);
+  assert.equal(hostGameState.payload.board[7 * 15 + 7], "BLACK");
+  assert.equal(guestGameState.payload.currentPlayer, "WHITE");
+
+  send(host.socket, MessageType.MOVE, { row: 7, col: 8 });
+  const turnError = await host.inbox.next(MessageType.ERROR);
+  assert.equal(turnError.payload.code, "NOT_YOUR_TURN");
+
+  send(guest.socket, MessageType.MOVE, { row: 7, col: 7 });
+  const occupiedError = await guest.inbox.next(MessageType.ERROR);
+  assert.equal(occupiedError.payload.code, "CELL_OCCUPIED");
 
   send(third.socket, MessageType.JOIN_ROOM, { roomCode: created.payload.roomCode }, "join-2");
   const fullError = await third.inbox.next(MessageType.ERROR);
@@ -114,6 +142,61 @@ test("真实 WebSocket 完成创建、加入、满房、心跳和断线通知", 
   await close(host.socket);
   const left = await leftPromise;
   assert.equal(left.payload.reason, "玩家网络连接已断开");
+});
+
+test("WebSocket 落子由服务器同步并广播胜负", async (context) => {
+  const app = createGameServer({
+    roomTimeoutMs: 60_000,
+    heartbeatIntervalMs: 60_000,
+    cleanupIntervalMs: 60_000,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+  const address = await app.listen(0, "127.0.0.1");
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  const host = await connect(wsUrl);
+  const guest = await connect(wsUrl);
+
+  context.after(async () => {
+    await Promise.all([close(host.socket), close(guest.socket)]);
+    await app.stop();
+  });
+
+  await Promise.all([
+    host.inbox.next(MessageType.CONNECTED),
+    guest.inbox.next(MessageType.CONNECTED)
+  ]);
+  send(host.socket, MessageType.CREATE_ROOM);
+  const created = await host.inbox.next(MessageType.ROOM_CREATED);
+  send(guest.socket, MessageType.JOIN_ROOM, { roomCode: created.payload.roomCode });
+  const joined = await guest.inbox.next(MessageType.ROOM_JOINED);
+  await Promise.all([
+    host.inbox.next(MessageType.GAME_START),
+    guest.inbox.next(MessageType.GAME_START),
+    host.inbox.next(MessageType.GAME_STATE),
+    guest.inbox.next(MessageType.GAME_STATE)
+  ]);
+
+  async function play(socket, row, col) {
+    send(socket, MessageType.MOVE, { row, col });
+    await Promise.all([
+      host.inbox.next(MessageType.GAME_STATE),
+      guest.inbox.next(MessageType.GAME_STATE)
+    ]);
+  }
+
+  for (let col = 3; col <= 6; col += 1) {
+    await play(host.socket, 7, col);
+    await play(guest.socket, 8, col);
+  }
+
+  const hostOver = host.inbox.next(MessageType.GAME_OVER);
+  const guestOver = guest.inbox.next(MessageType.GAME_OVER);
+  await play(host.socket, 7, 7);
+  const [hostResult, guestResult] = await Promise.all([hostOver, guestOver]);
+  assert.equal(hostResult.payload.winner, created.payload.playerId);
+  assert.equal(guestResult.payload.winner, created.payload.playerId);
+  assert.equal(hostResult.payload.reason, "WIN");
+  assert.notEqual(hostResult.payload.winner, joined.payload.playerId);
 });
 
 test("只有心跳但无业务活动的房间仍会超时清理", async (context) => {
