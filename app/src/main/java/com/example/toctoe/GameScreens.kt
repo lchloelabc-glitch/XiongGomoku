@@ -40,10 +40,13 @@ import kotlin.math.roundToInt
 @Composable
 fun GameApp(
     state: AppUiState,
+    onNicknameChange: (String) -> Unit,
     onCreateRoom: () -> Unit,
     onOpenJoin: () -> Unit,
     onJoinCodeChange: (String) -> Unit,
     onJoin: () -> Unit,
+    onReady: () -> Unit,
+    onRpsChoice: (RpsChoice) -> Unit,
     onMove: (Int, Int) -> Unit,
     onLeave: () -> Unit,
     modifier: Modifier = Modifier
@@ -51,9 +54,11 @@ fun GameApp(
     BackHandler(enabled = state.screen != AppScreen.HOME) { onLeave() }
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         when (state.screen) {
-            AppScreen.HOME -> HomeScreen(state, onCreateRoom, onOpenJoin)
+            AppScreen.HOME -> HomeScreen(state, onNicknameChange, onCreateRoom, onOpenJoin)
             AppScreen.HOST_WAIT -> HostWaitingScreen(state, onLeave)
-            AppScreen.JOIN -> JoinScreen(state, onJoinCodeChange, onJoin, onLeave)
+            AppScreen.JOIN -> JoinScreen(state, onNicknameChange, onJoinCodeChange, onJoin, onLeave)
+            AppScreen.READY -> ReadyScreen(state, onReady, onLeave)
+            AppScreen.RPS -> RpsScreen(state, onRpsChoice, onLeave)
             AppScreen.ROOM -> RoomScreen(state, onMove, onLeave)
         }
     }
@@ -71,11 +76,18 @@ private fun Page(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun HomeScreen(state: AppUiState, onCreateRoom: () -> Unit, onOpenJoin: () -> Unit) = Page {
+private fun HomeScreen(
+    state: AppUiState,
+    onNicknameChange: (String) -> Unit,
+    onCreateRoom: () -> Unit,
+    onOpenJoin: () -> Unit
+) = Page {
     Text("熊浩的五子棋", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
     Spacer(Modifier.height(14.dp))
     Text("通过公网服务器创建或加入双人房间", textAlign = TextAlign.Center)
-    Spacer(Modifier.height(36.dp))
+    Spacer(Modifier.height(28.dp))
+    NicknameField(state, onNicknameChange)
+    Spacer(Modifier.height(20.dp))
     Button(
         onClick = onCreateRoom,
         enabled = !state.isConnecting,
@@ -112,6 +124,8 @@ private fun HostWaitingScreen(state: AppUiState, onLeave: () -> Unit) = Page {
         Text("请将六位房间号告诉另一名玩家", textAlign = TextAlign.Center)
     }
     Spacer(Modifier.height(24.dp))
+    Text("你的昵称：${state.nickname}")
+    Spacer(Modifier.height(8.dp))
     ConnectionInfo(state)
     ErrorText(state.errorMessage)
     Spacer(Modifier.height(28.dp))
@@ -123,12 +137,15 @@ private fun HostWaitingScreen(state: AppUiState, onLeave: () -> Unit) = Page {
 @Composable
 private fun JoinScreen(
     state: AppUiState,
+    onNicknameChange: (String) -> Unit,
     onCodeChange: (String) -> Unit,
     onJoin: () -> Unit,
     onLeave: () -> Unit
 ) = Page {
     Text("加入公网房间", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
     Spacer(Modifier.height(28.dp))
+    NicknameField(state, onNicknameChange)
+    Spacer(Modifier.height(14.dp))
     OutlinedTextField(
         value = state.joinRoomCode,
         onValueChange = onCodeChange,
@@ -155,6 +172,69 @@ private fun JoinScreen(
 }
 
 @Composable
+private fun ReadyScreen(state: AppUiState, onReady: () -> Unit, onLeave: () -> Unit) = Page {
+    Text("双方准备", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+    Text("房间号：${state.roomCode}")
+    Spacer(Modifier.height(22.dp))
+    state.room?.players?.forEach { player ->
+        val identity = if (player.playerId == state.localPlayerId) "（你）" else ""
+        Text(
+            "${player.nickname}$identity：${if (player.ready) "已准备" else "未准备"}",
+            fontWeight = if (player.ready) FontWeight.Bold else FontWeight.Normal
+        )
+        Spacer(Modifier.height(8.dp))
+    }
+    Spacer(Modifier.height(18.dp))
+    val localReady = state.room?.players
+        ?.firstOrNull { it.playerId == state.localPlayerId }
+        ?.ready == true
+    Button(
+        onClick = onReady,
+        enabled = !localReady && !state.isReadyPending,
+        modifier = Modifier.fillMaxWidth().height(54.dp)
+    ) {
+        Text(if (localReady || state.isReadyPending) "已准备，等待对方" else "准备")
+    }
+    ErrorText(state.errorMessage)
+    Spacer(Modifier.height(16.dp))
+    OutlinedButton(onClick = onLeave, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+        Text("退出房间")
+    }
+}
+
+@Composable
+private fun RpsScreen(
+    state: AppUiState,
+    onChoice: (RpsChoice) -> Unit,
+    onLeave: () -> Unit
+) = Page {
+    Text("猜拳决定黑棋", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+    Spacer(Modifier.height(10.dp))
+    Text("胜者执黑并先行；平局将重新选择", textAlign = TextAlign.Center)
+    Spacer(Modifier.height(22.dp))
+    listOf(RpsChoice.ROCK, RpsChoice.SCISSORS, RpsChoice.PAPER).forEach { choice ->
+        Button(
+            onClick = { onChoice(choice) },
+            enabled = !state.isRpsSubmitted,
+            modifier = Modifier.fillMaxWidth().height(54.dp)
+        ) {
+            Text(
+                if (state.selectedRpsChoice == choice) "已选择：${choice.chineseName}" else choice.chineseName,
+                fontSize = 18.sp
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+    }
+    Text(state.rpsStatus, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold)
+    if (state.opponentRpsSubmitted) Text("对方已提交选择")
+    ErrorText(state.errorMessage)
+    Spacer(Modifier.height(16.dp))
+    OutlinedButton(onClick = onLeave, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+        Text("退出房间")
+    }
+}
+
+@Composable
 private fun RoomScreen(
     state: AppUiState,
     onMove: (Int, Int) -> Unit,
@@ -163,6 +243,18 @@ private fun RoomScreen(
     Text("五子棋对局", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
     Text("房间号：${state.roomCode}")
     Spacer(Modifier.height(10.dp))
+    val blackNickname = state.room?.players?.firstOrNull {
+        it.playerId == state.game.blackPlayerId
+    }?.nickname ?: "黑棋玩家"
+    val whiteNickname = state.room?.players?.firstOrNull {
+        it.playerId == state.game.whitePlayerId
+    }?.nickname ?: "白棋玩家"
+    Text("黑棋：$blackNickname")
+    Text("白棋：$whiteNickname")
+    if (state.rpsStatus.isNotEmpty()) {
+        Text("猜拳：${state.rpsStatus}", textAlign = TextAlign.Center)
+    }
+    Spacer(Modifier.height(8.dp))
     Text("你执：${state.myStone?.chineseName ?: "等待分配"}", fontWeight = FontWeight.SemiBold)
     Text(
         when {
@@ -194,6 +286,19 @@ private fun RoomScreen(
     OutlinedButton(onClick = onLeave, modifier = Modifier.fillMaxWidth().height(52.dp)) {
         Text("退出房间")
     }
+}
+
+@Composable
+private fun NicknameField(state: AppUiState, onNicknameChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = state.nickname,
+        onValueChange = onNicknameChange,
+        label = { Text("昵称（2～8个字符）") },
+        placeholder = { Text("例如：熊浩") },
+        singleLine = true,
+        enabled = !state.isConnecting,
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 @Composable

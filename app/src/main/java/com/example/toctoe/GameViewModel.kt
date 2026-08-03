@@ -8,10 +8,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class AppScreen { HOME, HOST_WAIT, JOIN, ROOM }
+enum class AppScreen { HOME, HOST_WAIT, JOIN, READY, RPS, ROOM }
 
 data class AppUiState(
     val screen: AppScreen = AppScreen.HOME,
+    val nickname: String = "玩家",
     val roomCode: String = "",
     val joinRoomCode: String = "",
     val isConnecting: Boolean = false,
@@ -20,6 +21,11 @@ data class AppUiState(
     val localPlayerId: String = "",
     val localSeat: Int = 0,
     val room: RoomSnapshot? = null,
+    val isReadyPending: Boolean = false,
+    val selectedRpsChoice: RpsChoice? = null,
+    val isRpsSubmitted: Boolean = false,
+    val opponentRpsSubmitted: Boolean = false,
+    val rpsStatus: String = "请选择石头、剪刀或布",
     val game: GomokuGameState = GomokuGameState(),
     val myStone: Stone? = null,
     val isMovePending: Boolean = false,
@@ -37,13 +43,21 @@ class GameViewModel : ViewModel() {
     private var pendingOperation: PendingOperation? = null
     private var sessionToken = 0L
 
+    fun updateNickname(value: String) {
+        if (nicknameCodePointCount(value) <= 8) {
+            _uiState.update { it.copy(nickname = value, errorMessage = "") }
+        }
+    }
+
     fun createRoom() {
+        val nickname = validatedNickname() ?: return
         if (_uiState.value.isConnecting) return
         closeConnection(sendLeave = false)
         val token = ++sessionToken
         pendingOperation = PendingOperation.CREATE_ROOM
         _uiState.value = AppUiState(
             screen = AppScreen.HOST_WAIT,
+            nickname = nickname,
             isConnecting = true,
             connectionStatus = "正在连接公网服务器"
         )
@@ -54,7 +68,7 @@ class GameViewModel : ViewModel() {
         closeConnection(sendLeave = false)
         sessionToken++
         pendingOperation = null
-        _uiState.value = AppUiState(screen = AppScreen.JOIN)
+        _uiState.value = AppUiState(screen = AppScreen.JOIN, nickname = _uiState.value.nickname)
     }
 
     fun updateJoinRoomCode(value: String) {
@@ -64,19 +78,19 @@ class GameViewModel : ViewModel() {
     }
 
     fun joinRoom() {
+        val nickname = validatedNickname() ?: return
         val current = _uiState.value
         if (current.isConnecting) return
-        val roomCode = current.joinRoomCode.trim()
-        if (!roomCode.matches(Regex("\\d{6}"))) {
+        if (!current.joinRoomCode.matches(Regex("\\d{6}"))) {
             _uiState.update { it.copy(errorMessage = "房间号必须是六位数字") }
             return
         }
-
         closeConnection(sendLeave = false)
         val token = ++sessionToken
         pendingOperation = PendingOperation.JOIN_ROOM
         _uiState.update {
             it.copy(
+                nickname = nickname,
                 isConnecting = true,
                 isConnected = false,
                 connectionStatus = "正在连接公网服务器",
@@ -84,6 +98,33 @@ class GameViewModel : ViewModel() {
             )
         }
         webSocketClient = WebSocketGameClient(listenerFor(token)).also { it.connect() }
+    }
+
+    fun ready() {
+        val current = _uiState.value
+        if (current.screen != AppScreen.READY || current.isReadyPending || current.localPlayer?.ready == true) return
+        if (webSocketClient?.send(NetworkMessageCodec.playerReady()) == true) {
+            _uiState.update { it.copy(isReadyPending = true, errorMessage = "") }
+        } else {
+            _uiState.update { it.copy(errorMessage = "准备请求发送失败") }
+        }
+    }
+
+    fun chooseRps(choice: RpsChoice) {
+        val current = _uiState.value
+        if (current.screen != AppScreen.RPS || current.isRpsSubmitted) return
+        if (webSocketClient?.send(NetworkMessageCodec.rpsChoice(choice)) == true) {
+            _uiState.update {
+                it.copy(
+                    selectedRpsChoice = choice,
+                    isRpsSubmitted = true,
+                    rpsStatus = "已选择${choice.chineseName}，等待对方",
+                    errorMessage = ""
+                )
+            }
+        } else {
+            _uiState.update { it.copy(errorMessage = "猜拳选择发送失败") }
+        }
     }
 
     fun leaveRoom() {
@@ -119,12 +160,11 @@ class GameViewModel : ViewModel() {
 
     private fun listenerFor(token: Long) = object : WebSocketGameListener {
         override fun onSocketOpen() = onMain(token) {
-            _uiState.update {
-                it.copy(isConnected = true, connectionStatus = "已连接服务器，正在处理房间请求")
-            }
+            _uiState.update { it.copy(isConnected = true, connectionStatus = "已连接服务器，正在处理房间请求") }
+            val state = _uiState.value
             val message = when (pendingOperation) {
-                PendingOperation.CREATE_ROOM -> NetworkMessageCodec.createRoom()
-                PendingOperation.JOIN_ROOM -> NetworkMessageCodec.joinRoom(_uiState.value.joinRoomCode)
+                PendingOperation.CREATE_ROOM -> NetworkMessageCodec.createRoom(state.nickname)
+                PendingOperation.JOIN_ROOM -> NetworkMessageCodec.joinRoom(state.joinRoomCode, state.nickname)
                 null -> null
             }
             if (message == null || webSocketClient?.send(message) != true) {
@@ -132,14 +172,8 @@ class GameViewModel : ViewModel() {
             }
         }
 
-        override fun onMessage(message: ServerMessage) = onMain(token) {
-            handleServerMessage(message)
-        }
-
-        override fun onConnectionError(message: String) = onMain(token) {
-            markConnectionError(message)
-        }
-
+        override fun onMessage(message: ServerMessage) = onMain(token) { handleServerMessage(message) }
+        override fun onConnectionError(message: String) = onMain(token) { markConnectionError(message) }
         override fun onDisconnected(message: String) = onMain(token) {
             _uiState.update {
                 it.copy(
@@ -177,11 +211,11 @@ class GameViewModel : ViewModel() {
                 pendingOperation = null
                 _uiState.update {
                     it.copy(
-                        screen = AppScreen.ROOM,
+                        screen = screenForStatus(message.room.status),
                         roomCode = message.roomCode,
                         isConnecting = false,
                         isConnected = true,
-                        connectionStatus = "已加入公网房间",
+                        connectionStatus = "已加入房间，请准备",
                         localPlayerId = message.playerId,
                         localSeat = message.seat,
                         room = message.room,
@@ -189,26 +223,51 @@ class GameViewModel : ViewModel() {
                     )
                 }
             }
-            is ServerMessage.RoomState -> {
-                val current = _uiState.value
+            is ServerMessage.RoomState -> _uiState.update {
                 val hasOpponent = message.room.playerCount >= 2
-                val nextScreen = if (hasOpponent) AppScreen.ROOM else AppScreen.HOST_WAIT
+                it.copy(
+                    screen = if (hasOpponent) screenForStatus(message.room.status) else AppScreen.HOST_WAIT,
+                    roomCode = message.room.roomCode,
+                    room = message.room,
+                    connectionStatus = statusText(message.room),
+                    game = if (hasOpponent) it.game else GomokuGameState(),
+                    myStone = if (hasOpponent) it.myStone else null,
+                    isReadyPending = false,
+                    selectedRpsChoice = if (hasOpponent) it.selectedRpsChoice else null,
+                    isRpsSubmitted = if (hasOpponent) it.isRpsSubmitted else false,
+                    opponentRpsSubmitted = if (hasOpponent) it.opponentRpsSubmitted else false,
+                    errorMessage = ""
+                )
+            }
+            is ServerMessage.PlayerReady -> _uiState.update {
+                it.copy(
+                    isReadyPending = if (message.playerId == it.localPlayerId) false else it.isReadyPending,
+                    connectionStatus = if (message.allReady) "双方已准备，进入猜拳" else "等待另一名玩家准备"
+                )
+            }
+            is ServerMessage.RpsSubmitted -> _uiState.update {
+                if (message.playerId == it.localPlayerId) it
+                else it.copy(opponentRpsSubmitted = true)
+            }
+            is ServerMessage.RpsResult -> {
+                val reveal = message.choices.joinToString("，") { "${it.nickname}：${it.choice.chineseName}" }
                 _uiState.update {
-                    it.copy(
-                        screen = nextScreen,
-                        roomCode = message.room.roomCode,
-                        room = message.room,
-                        connectionStatus = if (hasOpponent) {
-                            "两名玩家已进入房间"
-                        } else {
-                            "等待另一名玩家加入"
-                        },
-                        game = if (hasOpponent) it.game else GomokuGameState(),
-                        myStone = if (hasOpponent) it.myStone else null,
-                        isMovePending = false,
-                        gameResult = if (hasOpponent) it.gameResult else "",
-                        errorMessage = ""
-                    )
+                    if (message.tie) {
+                        it.copy(
+                            screen = AppScreen.RPS,
+                            selectedRpsChoice = null,
+                            isRpsSubmitted = false,
+                            opponentRpsSubmitted = false,
+                            rpsStatus = "$reveal；平局，请重新选择",
+                            errorMessage = ""
+                        )
+                    } else {
+                        it.copy(
+                            rpsStatus = "$reveal；${message.message}",
+                            opponentRpsSubmitted = true,
+                            errorMessage = ""
+                        )
+                    }
                 }
             }
             is ServerMessage.GameStart -> {
@@ -221,7 +280,7 @@ class GameViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         screen = AppScreen.ROOM,
-                        connectionStatus = "五子棋对局已开始",
+                        connectionStatus = "猜拳结束，五子棋对局已开始",
                         game = it.game.copy(
                             currentPlayer = message.currentPlayer,
                             blackPlayerId = message.blackPlayerId,
@@ -262,27 +321,24 @@ class GameViewModel : ViewModel() {
                 pendingOperation = null
                 webSocketClient?.close(sendLeave = false)
                 _uiState.update {
-                    it.copy(
-                        isConnecting = false,
-                        isConnected = false,
-                        connectionStatus = "房间已关闭",
-                        errorMessage = message.message
-                    )
+                    it.copy(isConnecting = false, isConnected = false, connectionStatus = "房间已关闭", errorMessage = message.message)
                 }
             }
-            is ServerMessage.PlayerLeave -> {
-                if (!message.acknowledged) {
-                    _uiState.update {
-                        it.copy(
-                            screen = AppScreen.HOST_WAIT,
-                            connectionStatus = "对方已退出",
-                            game = GomokuGameState(),
-                            myStone = null,
-                            isMovePending = false,
-                            gameResult = "",
-                            errorMessage = message.reason
-                        )
-                    }
+            is ServerMessage.PlayerLeave -> if (!message.acknowledged) {
+                _uiState.update {
+                    it.copy(
+                        screen = AppScreen.HOST_WAIT,
+                        connectionStatus = "对方已退出",
+                        room = it.room?.copy(status = "WAITING", playerCount = 1),
+                        game = GomokuGameState(),
+                        myStone = null,
+                        isReadyPending = false,
+                        selectedRpsChoice = null,
+                        isRpsSubmitted = false,
+                        opponentRpsSubmitted = false,
+                        gameResult = "",
+                        errorMessage = message.reason
+                    )
                 }
             }
             is ServerMessage.Error -> {
@@ -290,7 +346,9 @@ class GameViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isConnecting = false,
-                        connectionStatus = "房间请求失败",
+                        isReadyPending = false,
+                        isRpsSubmitted = false,
+                        selectedRpsChoice = null,
                         isMovePending = false,
                         errorMessage = message.message
                     )
@@ -303,22 +361,44 @@ class GameViewModel : ViewModel() {
         }
     }
 
+    private fun validatedNickname(): String? {
+        val nickname = normalizeNickname(_uiState.value.nickname)
+        if (!isValidNickname(nickname)) {
+            _uiState.update { it.copy(errorMessage = "昵称必须为2到8个字符") }
+            return null
+        }
+        return nickname
+    }
+
+    private fun screenForStatus(status: String): AppScreen = when (status) {
+        "WAITING" -> AppScreen.HOST_WAIT
+        "READY" -> AppScreen.READY
+        "RPS" -> AppScreen.RPS
+        "PLAYING", "GAME_OVER" -> AppScreen.ROOM
+        else -> AppScreen.HOST_WAIT
+    }
+
+    private fun statusText(room: RoomSnapshot): String = when (room.status) {
+        "WAITING" -> "等待另一名玩家加入"
+        "READY" -> "双方已进入房间，请准备"
+        "RPS" -> "双方已准备，请猜拳"
+        "PLAYING" -> "对局进行中"
+        "GAME_OVER" -> "对局已结束"
+        else -> "房间状态已更新"
+    }
+
+    private val AppUiState.localPlayer: RoomPlayer?
+        get() = room?.players?.firstOrNull { it.playerId == localPlayerId }
+
     private fun markConnectionError(message: String) {
         pendingOperation = null
         _uiState.update {
-            it.copy(
-                isConnecting = false,
-                isConnected = false,
-                connectionStatus = "服务器连接失败",
-                errorMessage = message
-            )
+            it.copy(isConnecting = false, isConnected = false, connectionStatus = "服务器连接失败", errorMessage = message)
         }
     }
 
     private fun onMain(token: Long, action: () -> Unit) {
-        viewModelScope.launch {
-            if (token == sessionToken) action()
-        }
+        viewModelScope.launch { if (token == sessionToken) action() }
     }
 
     private fun closeConnection(sendLeave: Boolean) {

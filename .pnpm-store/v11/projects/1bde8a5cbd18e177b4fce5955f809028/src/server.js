@@ -12,8 +12,6 @@ import {
 import { RoomError, RoomManager } from "./room-manager.js";
 
 const NOT_IMPLEMENTED_TYPES = new Set([
-  MessageType.PLAYER_READY,
-  MessageType.ROCK_PAPER_SCISSORS,
   MessageType.REMATCH_REQUEST
 ]);
 
@@ -116,7 +114,7 @@ export function createGameServer({
 
       switch (message.type) {
         case MessageType.CREATE_ROOM: {
-          const { room, player } = roomManager.createRoom(socket);
+          const { room, player } = roomManager.createRoom(socket, message.payload.nickname);
           sendMessage(socket, createMessage(MessageType.ROOM_CREATED, {
             roomCode: room.roomCode,
             playerId: player.playerId,
@@ -126,7 +124,11 @@ export function createGameServer({
           break;
         }
         case MessageType.JOIN_ROOM: {
-          const { room, player } = roomManager.joinRoom(socket, message.payload.roomCode);
+          const { room, player } = roomManager.joinRoom(
+            socket,
+            message.payload.roomCode,
+            message.payload.nickname
+          );
           sendMessage(socket, createMessage(MessageType.ROOM_JOINED, {
             roomCode: room.roomCode,
             playerId: player.playerId,
@@ -134,8 +136,39 @@ export function createGameServer({
             room: roomManager.getSnapshot(room)
           }, requestId));
           broadcastRoomState(room);
-          broadcastGameStart(room);
-          broadcastGameState(room);
+          break;
+        }
+        case MessageType.PLAYER_READY: {
+          const result = roomManager.markPlayerReady(socket);
+          broadcastRoom(result.room, createMessage(MessageType.PLAYER_READY, {
+            playerId: result.player.playerId,
+            nickname: result.player.nickname,
+            allReady: result.allReady
+          }, requestId));
+          broadcastRoomState(result.room);
+          break;
+        }
+        case MessageType.RPS_CHOICE: {
+          const result = roomManager.submitRpsChoice(socket, message.payload.choice);
+          broadcastRoom(result.room, createMessage(MessageType.RPS_CHOICE, {
+            playerId: result.player.playerId,
+            submitted: true
+          }, requestId));
+          if (result.resolved) {
+            broadcastRoom(result.room, createMessage(MessageType.RPS_RESULT, {
+              tie: result.tie,
+              choices: result.choices,
+              winner: result.winnerId ?? null,
+              blackPlayer: result.blackPlayer ?? null,
+              whitePlayer: result.whitePlayer ?? null,
+              message: result.tie ? "猜拳平局，请重新选择" : "猜拳结束，胜者执黑"
+            }));
+            if (!result.tie) {
+              broadcastRoomState(result.room);
+              broadcastGameStart(result.room);
+              broadcastGameState(result.room);
+            }
+          }
           break;
         }
         case MessageType.MOVE: {

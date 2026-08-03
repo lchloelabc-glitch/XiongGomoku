@@ -9,7 +9,24 @@ object ServerConfig {
     const val WEB_SOCKET_URL = "ws://118.31.168.127:8080/ws"
 }
 
-data class RoomPlayer(val playerId: String, val seat: Int)
+data class RoomPlayer(
+    val playerId: String,
+    val seat: Int,
+    val nickname: String,
+    val ready: Boolean
+)
+
+enum class RpsChoice(val wireValue: String, val chineseName: String) {
+    ROCK("ROCK", "石头"),
+    PAPER("PAPER", "布"),
+    SCISSORS("SCISSORS", "剪刀")
+}
+
+data class RpsReveal(
+    val playerId: String,
+    val nickname: String,
+    val choice: RpsChoice
+)
 
 data class RoomSnapshot(
     val roomCode: String,
@@ -36,6 +53,16 @@ sealed interface ServerMessage {
     ) : ServerMessage
 
     data class RoomState(val room: RoomSnapshot) : ServerMessage
+    data class PlayerReady(val playerId: String, val nickname: String, val allReady: Boolean) : ServerMessage
+    data class RpsSubmitted(val playerId: String) : ServerMessage
+    data class RpsResult(
+        val tie: Boolean,
+        val choices: List<RpsReveal>,
+        val winnerId: String?,
+        val blackPlayerId: String?,
+        val whitePlayerId: String?,
+        val message: String
+    ) : ServerMessage
     data class GameStart(
         val blackPlayerId: String,
         val whitePlayerId: String,
@@ -57,11 +84,21 @@ sealed interface ServerMessage {
 }
 
 object NetworkMessageCodec {
-    fun createRoom(): String = clientMessage("CREATE_ROOM", JSONObject())
+    fun createRoom(nickname: String): String = clientMessage(
+        "CREATE_ROOM",
+        JSONObject().put("nickname", nickname)
+    )
 
-    fun joinRoom(roomCode: String): String = clientMessage(
+    fun joinRoom(roomCode: String, nickname: String): String = clientMessage(
         "JOIN_ROOM",
-        JSONObject().put("roomCode", roomCode)
+        JSONObject().put("roomCode", roomCode).put("nickname", nickname)
+    )
+
+    fun playerReady(): String = clientMessage("PLAYER_READY", JSONObject())
+
+    fun rpsChoice(choice: RpsChoice): String = clientMessage(
+        "RPS_CHOICE",
+        JSONObject().put("choice", choice.wireValue)
     )
 
     fun move(row: Int, col: Int): String = clientMessage(
@@ -98,6 +135,31 @@ object NetworkMessageCodec {
                 readRoom(payload.getJSONObject("room"))
             )
             "ROOM_STATE" -> ServerMessage.RoomState(readRoom(payload.getJSONObject("room")))
+            "PLAYER_READY" -> ServerMessage.PlayerReady(
+                payload.requiredString("playerId"),
+                payload.requiredString("nickname"),
+                payload.optBoolean("allReady", false)
+            )
+            "RPS_CHOICE" -> ServerMessage.RpsSubmitted(payload.requiredString("playerId"))
+            "RPS_RESULT" -> {
+                val choicesJson = payload.getJSONArray("choices")
+                val choices = List(choicesJson.length()) { index ->
+                    val choice = choicesJson.getJSONObject(index)
+                    RpsReveal(
+                        choice.requiredString("playerId"),
+                        choice.requiredString("nickname"),
+                        choice.requiredString("choice").toRpsChoice()
+                    )
+                }
+                ServerMessage.RpsResult(
+                    tie = payload.optBoolean("tie", false),
+                    choices = choices,
+                    winnerId = payload.optionalString("winner"),
+                    blackPlayerId = payload.optionalString("blackPlayer"),
+                    whitePlayerId = payload.optionalString("whitePlayer"),
+                    message = payload.optString("message", "猜拳结果已公布")
+                )
+            }
             "GAME_START" -> ServerMessage.GameStart(
                 payload.requiredString("blackPlayer"),
                 payload.requiredString("whitePlayer"),
@@ -163,7 +225,12 @@ object NetworkMessageCodec {
         val playerArray = json.getJSONArray("players")
         val players = List(playerArray.length()) { index ->
             val player = playerArray.getJSONObject(index)
-            RoomPlayer(player.requiredString("playerId"), player.getInt("seat"))
+            RoomPlayer(
+                player.requiredString("playerId"),
+                player.getInt("seat"),
+                player.requiredString("nickname"),
+                player.optBoolean("ready", false)
+            )
         }
         return RoomSnapshot(
             json.requiredString("roomCode"),
@@ -181,6 +248,10 @@ object NetworkMessageCodec {
         "WHITE" -> Stone.WHITE
         else -> throw IllegalArgumentException("服务器棋子颜色无效")
     }
+
+    private fun String.toRpsChoice(): RpsChoice =
+        RpsChoice.entries.firstOrNull { it.wireValue == this }
+            ?: throw IllegalArgumentException("服务器猜拳数据无效")
 
     private fun JSONObject.optionalString(name: String): String? =
         if (!has(name) || isNull(name)) null else getString(name).takeIf(String::isNotBlank)

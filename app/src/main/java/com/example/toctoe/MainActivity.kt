@@ -25,10 +25,13 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     GameApp(
                         state = state,
+                        onNicknameChange = gameViewModel::updateNickname,
                         onCreateRoom = gameViewModel::createRoom,
                         onOpenJoin = gameViewModel::openJoinPage,
                         onJoinCodeChange = gameViewModel::updateJoinRoomCode,
                         onJoin = gameViewModel::joinRoom,
+                        onReady = gameViewModel::ready,
+                        onRpsChoice = gameViewModel::chooseRps,
                         onMove = gameViewModel::playMove,
                         onLeave = gameViewModel::leaveRoom,
                         modifier = Modifier.padding(innerPadding)
