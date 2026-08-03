@@ -11,14 +11,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.toctoe.ui.theme.TocToeTheme
+import com.example.toctoe.ui.theme.BearTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            TocToeTheme {
+            BearTheme {
                 val gameViewModel: GameViewModel = viewModel()
                 val state by gameViewModel.uiState.collectAsStateWithLifecycle()
 

@@ -35,6 +35,14 @@ android {
     }
 }
 
+extensions.configure<com.android.build.api.variant.ApplicationAndroidComponentsExtension> {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.outputs.forEach { output ->
+            output.outputFileName.set("小熊五子棋.apk")
+        }
+    }
+}
+
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
